@@ -8,7 +8,7 @@ class SubtitleGeneratorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Whisper 字幕生成器")
-        self.root.geometry("600x500")
+        self.root.geometry("600x550")  # 调整高度以适应新控件
         self.root.resizable(True, True)  # 允许窗口调整大小
 
         # 存储选中的文件路径
@@ -90,6 +90,17 @@ class SubtitleGeneratorApp:
         self.btn_browse_output = tk.Button(config_frame, text="浏览...", command=self.browse_output_dir)
         self.btn_browse_output.grid(row=1, column=3, padx=5, pady=5)
 
+        # 新增：最大字符数设置
+        max_chars_label = tk.Label(config_frame, text="最大字符数 (英文/标点):")
+        max_chars_label.grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        
+        self.max_chars_var = tk.StringVar(value="20")  # 默认值20
+        self.max_chars_entry = tk.Entry(config_frame, textvariable=self.max_chars_var, width=10)
+        self.max_chars_entry.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        # 添加说明标签
+        chars_info_label = tk.Label(config_frame, text="(默认20，0表示不启用)", font=("Arial", 8))
+        chars_info_label.grid(row=2, column=1, sticky="w", padx=(100, 5), pady=5)
+
         # --- 控制按钮 ---
         control_frame = tk.Frame(self.root)
         control_frame.pack(fill="x", padx=10, pady=5)
@@ -168,6 +179,19 @@ class SubtitleGeneratorApp:
             messagebox.showerror("错误", "请选择输出目录。")
             return
 
+        # 获取并验证最大字符数
+        try:
+            max_chars_str = self.max_chars_var.get()
+            if max_chars_str.strip() == "":
+                max_chars = 0  # 如果为空，视为不启用
+            else:
+                max_chars = int(max_chars_str)
+                if max_chars < 0:
+                    raise ValueError("最大字符数不能为负数")
+        except ValueError as e:
+            messagebox.showerror("输入错误", f"最大字符数必须是一个非负整数: {e}")
+            return
+
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
 
@@ -180,12 +204,12 @@ class SubtitleGeneratorApp:
         self.btn_start.config(state="disabled", text="处理中...")
         processing_thread = threading.Thread(
             target=self.process_files_thread,
-            args=(self.selected_files, output_dir, language_code, model_size),
+            args=(self.selected_files, output_dir, language_code, model_size, max_chars),
             daemon=True
         )
         processing_thread.start()
 
-    def process_files_thread(self, files, output_dir, language, model_size):
+    def process_files_thread(self, files, output_dir, language, model_size, max_chars):
         """在后台线程中处理文件"""
         try:
             total_files = len(files)
@@ -195,7 +219,8 @@ class SubtitleGeneratorApp:
             for i, file_path in enumerate(files):
                 self.log(f"[{i+1}/{total_files}] 正在处理: {os.path.basename(file_path)}")
                 try:
-                    if process_file(file_path, output_dir, language=language, model_size=model_size):
+                    # 传递 max_chars 参数
+                    if process_file(file_path, output_dir, language=language, model_size=model_size, max_chars=max_chars):
                         self.log(f"[{i+1}/{total_files}] 成功: {os.path.basename(file_path)}")
                         success_count += 1
                     else:

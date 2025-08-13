@@ -4,6 +4,7 @@ import ffmpeg
 import datetime
 import tempfile
 import re
+import pysrt
 
 # 尝试导入 stable-ts 库
 try:
@@ -84,6 +85,133 @@ def generate_srt(segments, output_srt_path):
         print(f"保存SRT文件时出错: {e}")
         return False
 
+def split_long_lines(srt_file_path, max_chars_per_line=20):
+    """
+    对SRT文件中的长行进行智能分割。
+    
+    :param srt_file_path: SRT文件路径
+    :param max_chars_per_line: 每行最大字符数（英文/标点）
+    :return: True if successful, False otherwise
+    """
+    if max_chars_per_line <= 0:
+        print("最大字符数设置为0或负数，跳过字幕行分割。")
+        return True
+        
+    try:
+        # 读取SRT文件
+        subs = pysrt.open(srt_file_path, encoding='utf-8')
+        
+        new_subs = pysrt.SubRipFile() # 创建一个新的SRT文件对象
+        new_index = 1 # 新的字幕序号
+        
+        # 定义优先级的标点符号，用于寻找分割点
+        # 逗号、顿号、分号作为首选分割点，句号、感叹号、问号作为次选
+        preferred_punctuation = [',', '、', ';']
+        secondary_punctuation = ['。', '！', '!', '.', '?']
+        all_punctuation = preferred_punctuation + secondary_punctuation
+        
+        for sub in subs:
+            text = sub.text.strip()
+            
+            # 如果文本长度小于等于最大字符数，或者没有空格和标点，则不进行分割
+            if len(text) <= max_chars_per_line or not any(c in text for c in all_punctuation + [' ']):
+                new_sub = pysrt.SubRipItem(index=new_index, start=sub.start, end=sub.end, text=text)
+                new_subs.append(new_sub)
+                new_index += 1
+                continue
+            
+            # 需要分割
+            parts = []
+            remaining_text = text
+            
+            while len(remaining_text) > max_chars_per_line:
+                # 寻找最佳分割点
+                split_point = -1
+                # 1. 优先在首选标点符号处分割
+                for punct in preferred_punctuation:
+                    # 从最大长度处向前查找
+                    temp_split_point = remaining_text.rfind(punct, 0, max_chars_per_line)
+                    if temp_split_point != -1:
+                        split_point = temp_split_point + 1 # 包含标点符号
+                        break
+                
+                # 2. 如果没找到首选标点，则在次选标点处分割
+                if split_point == -1:
+                    for punct in secondary_punctuation:
+                        temp_split_point = remaining_text.rfind(punct, 0, max_chars_per_line)
+                        if temp_split_point != -1:
+                            split_point = temp_split_point + 1 # 包含标点符号
+                            break
+                
+                # 3. 如果还没找到标点，则在空格处分割（避免拆分单词）
+                if split_point == -1:
+                    # 从最大长度处向前查找最近的空格
+                    split_point = remaining_text.rfind(' ', 0, max_chars_per_line)
+                    if split_point != -1:
+                        split_point += 1 # 空格后开始新行
+                
+                # 4. 如果连空格都没找到，就强制在max_chars_per_line处分割（不太理想，但避免无限循环）
+                if split_point <= 0 or split_point >= len(remaining_text):
+                    split_point = max_chars_per_line
+                
+                # 分割文本
+                part = remaining_text[:split_point].strip()
+                parts.append(part)
+                remaining_text = remaining_text[split_point:].strip()
+            
+            # 添加最后一部分（如果有的话）
+            if remaining_text:
+                parts.append(remaining_text)
+            
+            # 如果只分割成一部分，则无需改变时间戳
+            if len(parts) == 1:
+                new_sub = pysrt.SubRipItem(index=new_index, start=sub.start, end=sub.end, text=parts[0])
+                new_subs.append(new_sub)
+                new_index += 1
+            else:
+                # 计算总时长（秒）
+                total_duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0 # pysrt时间戳是毫秒
+                
+                # 按字符长度分配时间
+                total_chars = sum(len(part) for part in parts)
+                if total_chars == 0: 
+                    total_chars = 1 # 避免除以零
+                
+                current_start_time = sub.start
+                
+                for i, part in enumerate(parts):
+                    # 计算当前片段的持续时间
+                    part_duration = total_duration * (len(part) / total_chars)
+                    
+                    # 确保至少有最小显示时间，例如0.5秒
+                    min_duration = 0.5
+                    if part_duration < min_duration and i < len(parts) - 1:
+                        part_duration = min_duration
+                    
+                    # 计算结束时间
+                    current_end_time = pysrt.SubRipTime.from_ordinal(int(current_start_time.ordinal + part_duration * 1000))
+                    
+                    # 确保结束时间不超过原字幕的结束时间
+                    if i == len(parts) - 1: # 最后一部分
+                        current_end_time = sub.end
+                    
+                    # 创建新的字幕项
+                    new_sub = pysrt.SubRipItem(index=new_index, start=current_start_time, end=current_end_time, text=part)
+                    new_subs.append(new_sub)
+                    new_index += 1
+                    
+                    # 下一个片段的开始时间是当前片段的结束时间
+                    current_start_time = current_end_time
+
+        # 保存修改后的SRT文件
+        new_subs.save(srt_file_path, encoding='utf-8')
+        print(f"字幕行分割完成并保存至: {srt_file_path}")
+        return True
+        
+    except Exception as e:
+        print(f"分割SRT文件时出错: {e}")
+        return False
+
 def transcribe_audio(audio_path, language=None, model_size='base'):
     """
     使用Whisper模型对音频进行转录
@@ -156,13 +284,14 @@ def transcribe_audio(audio_path, language=None, model_size='base'):
         print(f"语音识别时出错: {e}")
         return None
 
-def process_file(input_file_path, output_dir, language=None, model_size='base'):
+def process_file(input_file_path, output_dir, language=None, model_size='base', max_chars=20):
     """
     处理单个文件（音视频）并生成SRT字幕
     :param input_file_path: 输入文件路径
     :param output_dir: 输出SRT文件的目录
     :param language: 音频语言 (可选)
     :param model_size: Whisper模型大小
+    :param max_chars: 每行最大字符数 (0表示不启用分割)
     :return: True if successful, False otherwise
     """
     file_type = get_file_type(input_file_path)
@@ -206,6 +335,14 @@ def process_file(input_file_path, output_dir, language=None, model_size='base'):
         # 生成SRT文件
         if generate_srt(result['segments'], output_srt_path):
             print(f"成功为 {input_file_path} 生成字幕文件 {output_srt_path}")
+            # 新增：如果设置了最大字符数，则对生成的SRT文件进行分割
+            if max_chars > 0:
+                print(f"正在对字幕文件进行行分割，最大字符数: {max_chars}")
+                if split_long_lines(output_srt_path, max_chars_per_line=max_chars):
+                    print(f"字幕行分割完成: {output_srt_path}")
+                else:
+                    print(f"字幕行分割失败: {output_srt_path}")
+                    return False
             return True
         else:
             print(f"为 {input_file_path} 生成SRT文件失败。")
